@@ -10,7 +10,8 @@ pub mod hal {
         addr: u8,
     }
 
-    pub type Result<T> = std::result::Result<T, LinuxI2CError>;
+    pub type Error = LinuxI2CError;
+    pub type Result<T> = std::result::Result<T, Error>;
 
     impl I2CDevice {
         pub fn new(path: impl AsRef<Path>, addr: u8) -> Result<Self> {
@@ -61,14 +62,7 @@ pub mod hal {
                 addr,
             }))
         }
-        pub fn write(
-            &mut self,
-            text: &str,
-            line: u8,
-            column: u8,
-            everycolumn: bool,
-        ) -> Result<()> {
-
+        pub fn write(&mut self, text: &str, line: u8, column: u8, everycolumn: bool) -> Result<()> {
             #[inline]
             fn lineno(line: u8, column: u8) -> u8 {
                 let column = column.clamp(0, 19);
@@ -80,14 +74,16 @@ pub mod hal {
                 .lines()
                 .enumerate()
                 .flat_map(|(i, s)| {
-                    use std::io::{Cursor,Write};
+                    use std::io::{Cursor, Write};
                     let line = line + (i % 256) as u8;
                     let column = if i == 0 || everycolumn { column } else { 0 };
                     let mut ret = [0u8; 22];
                     let mut writer = Cursor::new(&mut ret[..]);
 
                     writer.write_all(&[254, lineno(line, column)]).unwrap();
-                    writer.write_all(s.as_bytes().chunks(20).next().unwrap_or_default()).unwrap();
+                    writer
+                        .write_all(s.as_bytes().chunks(20).next().unwrap_or_default())
+                        .unwrap();
                     std::array::IntoIter::new(ret)
                 })
                 .collect::<Vec<_>>();
@@ -98,12 +94,11 @@ pub mod hal {
         }
         pub fn write_lines(
             &mut self,
-            lines: impl IntoIterator<Item=impl AsRef<str>>,
+            lines: impl IntoIterator<Item = impl AsRef<str>>,
             line: u8,
             column: u8,
             everycolumn: bool,
         ) -> Result<()> {
-
             #[inline]
             fn lineno(line: u8, column: u8) -> u8 {
                 let column = column.clamp(0, 19);
@@ -111,7 +106,8 @@ pub mod hal {
             }
             let line = line;
             let column = column.clamp(0, 19);
-            let lines = lines.into_iter()
+            let lines = lines
+                .into_iter()
                 .enumerate()
                 .flat_map(|(i, s)| {
                     use std::io::Write;
@@ -119,8 +115,12 @@ pub mod hal {
                     let column = if i == 0 || everycolumn { column } else { 0 };
                     let mut ret = [0u8; 22];
                     ret.as_mut();
-                    (&mut ret[0..2]).write_all(&[254, lineno(line, column)]).unwrap();
-                    (&mut ret[2..]).write_all(s.as_ref().as_bytes().chunks(20).next().unwrap_or_default()).unwrap();
+                    (&mut ret[0..2])
+                        .write_all(&[254, lineno(line, column)])
+                        .unwrap();
+                    (&mut ret[2..])
+                        .write_all(s.as_ref().as_bytes().chunks(20).next().unwrap_or_default())
+                        .unwrap();
                     std::array::IntoIter::new(ret)
                 })
                 .collect::<Vec<_>>();
@@ -236,20 +236,50 @@ pub mod hal {
 }
 
 pub mod ui {
-    use super::hal::*;
+    use regex_automata::DFA;
+    use thiserror::Error;
+
+    use super::hal::{self, EncoderReading, SerLCD, SparkfunEncoder, SparkfunKeypad};
     use std::borrow::Cow;
 
-    pub struct Menu<'a> { lcd: SerLCD, encoder: SparkfunEncoder, options: &'a [Cow<'a, str>], cursor: usize }
+    #[derive(Error, Debug)]
+    pub enum UiError {
+        #[error("i2c bus fault")]
+        I2C(#[from] hal::Error),
+        #[error("regex syntax problem")]
+        Regex(#[from] regex_automata::Error),
+    }
+
+    pub type Result<T> = std::result::Result<T, UiError>;
+
+    pub struct Menu<'a> {
+        lcd: SerLCD,
+        encoder: SparkfunEncoder,
+        options: &'a [Cow<'a, str>],
+        cursor: usize,
+    }
     impl<'a> Menu<'a> {
-        pub fn new(lcd: SerLCD, mut encoder: SparkfunEncoder, options: &'a [Cow<'_, str>], start: usize) -> Result<Self> {
+        pub fn new(
+            lcd: SerLCD,
+            mut encoder: SparkfunEncoder,
+            options: &'a [Cow<'_, str>],
+            start: usize,
+        ) -> Result<Self> {
             encoder.tare(0)?;
             let cursor = start;
-            Ok(Self { lcd, encoder, options, cursor })
+            Ok(Self {
+                lcd,
+                encoder,
+                options,
+                cursor,
+            })
         }
-        pub fn into_inner(self) -> (SerLCD, SparkfunEncoder) { (self.lcd, self.encoder) }
+        pub fn into_inner(self) -> (SerLCD, SparkfunEncoder) {
+            (self.lcd, self.encoder)
+        }
         pub fn tick(&mut self) -> Result<Option<usize>> {
             fn offset(i: i16, len: usize) -> usize {
-                let rem = i%len as i16;
+                let rem = i % len as i16;
                 if rem < 0 {
                     len + ((-rem) as usize)
                 } else {
@@ -262,10 +292,10 @@ pub mod ui {
                     let old_cursor = self.cursor;
                     self.cursor = offset(x, self.options.len());
                     if self.cursor != old_cursor {
-                        self.lcd.write(">", (self.cursor%4) as u8, 0, false)?;
+                        self.lcd.write(">", (self.cursor % 4) as u8, 0, false)?;
                         if self.cursor / 4 != old_cursor / 4 {
                             let first_idx = self.cursor / 4 * 4;
-                            let lines = &self.options[first_idx..first_idx+4];
+                            let lines = &self.options[first_idx..first_idx + 4];
                             self.lcd.write_lines(lines, 0, 2, true)?;
                         }
                     }
@@ -276,36 +306,74 @@ pub mod ui {
         }
     }
 
-    const BUFFERSIZE: usize = 10; // = floor(log10(2^32))
-    pub struct CodeConfirmation { lcd: SerLCD, keypad: SparkfunKeypad, message: &'static str, expectation: [u8; BUFFERSIZE], progress: usize, last_refresh: std::time::Instant }
+    type ID = u16;
+    pub struct CodeConfirmation {
+        lcd: SerLCD,
+        keypad: SparkfunKeypad,
+        message: &'static str,
+        expectation: u32,
+        matcher: Box<dyn regex_automata::DFA<ID = ID>>,
+        state: ID,
+        last_refresh: Option<std::time::Instant>,
+    }
     impl CodeConfirmation {
-        pub fn new(mut lcd: SerLCD, keypad: SparkfunKeypad, message: &'static str, expectation: u32) -> Result<Self> {
+        pub fn new(
+            mut lcd: SerLCD,
+            keypad: SparkfunKeypad,
+            message: &'static str,
+            expectation: u32,
+        ) -> Result<Self> {
             lcd.clear()?;
             lcd.write(message, 0, 0, false)?;
             lcd.write(&format!("code: {}", expectation), 3, 0, false)?;
             //lcd.write("", 3, "code: ".len() as u8, false)?;
-            let expectation: [u8; BUFFERSIZE] = {
-                use std::io::Write;
-                let mut ret: [u8; BUFFERSIZE] = Default::default();
-                write!(&mut ret[..], "{}", expectation).unwrap();
-                ret
+
+            let matcher = match regex_automata::DenseDFA::new(&expectation.to_string())?.to_u16()? {
+                regex_automata::DenseDFA::PremultipliedByteClass(d) => Box::new(d),
+                _ => unreachable!(),
             };
-            Ok(Self { lcd, keypad, message, expectation, progress: 0, last_refresh: std::time::Instant::now() })
+            let state = matcher.start_state();
+            Ok(Self {
+                lcd,
+                keypad,
+                message,
+                expectation,
+                matcher,
+                state,
+                last_refresh: Some(std::time::Instant::now()),
+            })
         }
-        pub fn into_inner(self) -> (SerLCD, SparkfunKeypad) { (self.lcd, self.keypad) }
+        pub fn into_inner(self) -> (SerLCD, SparkfunKeypad) {
+            (self.lcd, self.keypad)
+        }
         pub fn tick(&mut self) -> Result<bool> {
-            if self.last_refresh.elapsed().as_secs() > 5 {
+            if self
+                .last_refresh
+                .map(|i| i.elapsed().as_secs() > 5)
+                .unwrap_or(true)
+            {
                 self.lcd.clear()?;
                 self.lcd.write(self.message, 0, 0, false)?;
-                self.lcd.write(&format!("code: {}", String::from_utf8_lossy(&self.expectation).as_ref()), 3, 0, false)?;
+                self.lcd
+                    .write(&format!("code: {}", self.expectation).as_ref(), 3, 0, false)?;
+                self.last_refresh = Some(std::time::Instant::now())
             }
-            Ok(match self.keypad.read()? {
-                '\0' if self.expectation.get(self.progress).copied().unwrap_or_default() == 0 => {
-                    true
-                },
-                '\0' => false,
-                c if c == self.expectation[self.progress] as char => { self.progress += 1; false }
-                _ => { self.progress = 0; false }
+            match self.keypad.read()? as u8 {
+                0 => {}
+                c => {
+                    // self.state always comes from the DFA, so elide bounds checks
+                    self.state = unsafe { self.matcher.next_state_unchecked(self.state, c) };
+                }
+            }
+            Ok(if self.matcher.is_match_state(self.state) {
+                true
+            } else if self.matcher.is_dead_state(self.state) {
+                self.last_refresh.take();
+                self.lcd.write("********************", 3, 0, false)?;
+                self.state = self.matcher.start_state();
+                false
+            } else {
+                false
             })
         }
     }
