@@ -9,5 +9,6 @@ edition = "2018"
 [dependencies]
 embedded-hal = "0.2.4"
 linux-embedded-hal = { version = "0.3.0" }
+may = "0.3.19"
 regex-automata = "0.1.9"
 thiserror = "1.0.24"

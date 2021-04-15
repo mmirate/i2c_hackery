@@ -1,3 +1,5 @@
+#[warn(clippy::all)]
+
 pub mod hal {
 
     use std::path::Path;
@@ -82,7 +84,12 @@ pub mod hal {
 
                     writer.write_all(&[254, lineno(line, column)]).unwrap();
                     writer
-                        .write_all(s.as_bytes().chunks(20).next().unwrap_or_default())
+                        .write_all(
+                            s.as_bytes()
+                                .chunks(20 - column as usize)
+                                .next()
+                                .unwrap_or_default(),
+                        )
                         .unwrap();
                     std::array::IntoIter::new(ret)
                 })
@@ -252,129 +259,79 @@ pub mod ui {
 
     pub type Result<T> = std::result::Result<T, UiError>;
 
-    pub struct Menu<'a> {
-        lcd: SerLCD,
-        encoder: SparkfunEncoder,
-        options: &'a [Cow<'a, str>],
-        cursor: usize,
-    }
-    impl<'a> Menu<'a> {
-        pub fn new(
-            lcd: SerLCD,
-            mut encoder: SparkfunEncoder,
-            options: &'a [Cow<'_, str>],
-            start: usize,
-        ) -> Result<Self> {
+    pub fn menu<'a>(
+        options: &'a [Cow<'_, str>],
+    ) -> Box<dyn FnMut(&mut SerLCD, &mut SparkfunEncoder, usize) -> Result<Option<usize>> + 'a>
+    {
+        fn offset(i: i16, len: usize) -> usize {
+            let rem = i % len as i16;
+            if rem < 0 {
+                len + ((-rem) as usize)
+            } else {
+                rem as usize
+            }
+        }
+        Box::new(move |lcd, encoder, start: usize| {
             encoder.tare(0)?;
-            let cursor = start;
-            Ok(Self {
-                lcd,
-                encoder,
-                options,
-                cursor,
-            })
-        }
-        pub fn into_inner(self) -> (SerLCD, SparkfunEncoder) {
-            (self.lcd, self.encoder)
-        }
-        pub fn tick(&mut self) -> Result<Option<usize>> {
-            fn offset(i: i16, len: usize) -> usize {
-                let rem = i % len as i16;
-                if rem < 0 {
-                    len + ((-rem) as usize)
-                } else {
-                    rem as usize
+            let mut cursor = start;
+            use EncoderReading::*;
+            while let Position(x) = encoder.read()? {
+                let old_cursor = cursor;
+                cursor = offset(x, options.len());
+                if cursor != old_cursor {
+                    lcd.write(">", (cursor % 4) as u8, 0, false)?;
+                    if cursor / 4 != old_cursor / 4 {
+                        let first_idx = cursor / 4 * 4;
+                        let lines = &options[first_idx..first_idx + 4];
+                        lcd.write_lines(lines, 0, 2, true)?;
+                    }
                 }
             }
-            use EncoderReading::*;
-            Ok(match self.encoder.read()? {
-                Position(x) => {
-                    let old_cursor = self.cursor;
-                    self.cursor = offset(x, self.options.len());
-                    if self.cursor != old_cursor {
-                        self.lcd.write(">", (self.cursor % 4) as u8, 0, false)?;
-                        if self.cursor / 4 != old_cursor / 4 {
-                            let first_idx = self.cursor / 4 * 4;
-                            let lines = &self.options[first_idx..first_idx + 4];
-                            self.lcd.write_lines(lines, 0, 2, true)?;
-                        }
-                    }
-                    None
-                }
-                ButtonClick => Some(self.cursor),
-            })
-        }
+            Ok(Some(cursor))
+        })
     }
 
-    type ID = u16;
-    pub struct CodeConfirmation {
-        lcd: SerLCD,
-        keypad: SparkfunKeypad,
-        message: &'static str,
-        expectation: u32,
-        matcher: Box<dyn regex_automata::DFA<ID = ID>>,
-        state: ID,
-        last_refresh: Option<std::time::Instant>,
-    }
-    impl CodeConfirmation {
-        pub fn new(
-            mut lcd: SerLCD,
-            keypad: SparkfunKeypad,
-            message: &'static str,
-            expectation: u32,
-        ) -> Result<Self> {
+    pub fn code_confirmation(message: &'static str) -> Box<dyn FnMut(&mut SerLCD, &mut SparkfunKeypad, u32) -> Result<()> + 'static> {
+        Box::new(move |lcd, keypad, expectation| {
             lcd.clear()?;
             lcd.write(message, 0, 0, false)?;
             lcd.write(&format!("code: {}", expectation), 3, 0, false)?;
             //lcd.write("", 3, "code: ".len() as u8, false)?;
+            let mut last_refresh = Some(std::time::Instant::now());
 
             let matcher = match regex_automata::DenseDFA::new(&expectation.to_string())?.to_u16()? {
                 regex_automata::DenseDFA::PremultipliedByteClass(d) => Box::new(d),
                 _ => unreachable!(),
             };
-            let state = matcher.start_state();
-            Ok(Self {
-                lcd,
-                keypad,
-                message,
-                expectation,
-                matcher,
-                state,
-                last_refresh: Some(std::time::Instant::now()),
-            })
-        }
-        pub fn into_inner(self) -> (SerLCD, SparkfunKeypad) {
-            (self.lcd, self.keypad)
-        }
-        pub fn tick(&mut self) -> Result<bool> {
-            if self
-                .last_refresh
-                .map(|i| i.elapsed().as_secs() > 5)
-                .unwrap_or(true)
-            {
-                self.lcd.clear()?;
-                self.lcd.write(self.message, 0, 0, false)?;
-                self.lcd
-                    .write(&format!("code: {}", self.expectation).as_ref(), 3, 0, false)?;
-                self.last_refresh = Some(std::time::Instant::now())
-            }
-            match self.keypad.read()? as u8 {
-                0 => {}
-                c => {
-                    // self.state always comes from the DFA, so elide bounds checks
-                    self.state = unsafe { self.matcher.next_state_unchecked(self.state, c) };
+            let mut state = matcher.start_state();
+
+            while !matcher.is_match_state(state) {
+                if last_refresh
+                    .map(|i| i.elapsed().as_secs() > 5)
+                    .unwrap_or(true)
+                {
+                    lcd.clear()?;
+                    lcd.write(message, 0, 0, false)?;
+                    lcd
+                        .write(&format!("code: {}", expectation).as_ref(), 3, 0, false)?;
+                    last_refresh = Some(std::time::Instant::now())
+                }
+                match keypad.read()? as u8 {
+                    0 => {}
+                    c => {
+                        // state always comes from the DFA, so elide bounds checks
+                        state = unsafe { matcher.next_state_unchecked(state, c) };
+                    }
+                }
+                if matcher.is_dead_state(state) {
+                    last_refresh.take();
+                    lcd.write("********************", 3, 0, false)?;
+                    state = matcher.start_state();
                 }
             }
-            Ok(if self.matcher.is_match_state(self.state) {
-                true
-            } else if self.matcher.is_dead_state(self.state) {
-                self.last_refresh.take();
-                self.lcd.write("********************", 3, 0, false)?;
-                self.state = self.matcher.start_state();
-                false
-            } else {
-                false
-            })
-        }
+            Ok(())
+        })
     }
+
+
 }
