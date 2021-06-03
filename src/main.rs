@@ -2,10 +2,12 @@ use i2c_hackery::*;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut keypad = hal::SparkfunKeypad::new("/dev/i2c-1", 0x4B)?;
+    webif::do_stuff("token").await?;
 
-    let value = keypad.read().await?;
+    //let mut keypad = hal::SparkfunKeypad::new("/dev/i2c-1", 0x4B)?;
 
-    println!("Read value: {:?}", value);
+    //let value = keypad.read().await?;
+
+    //println!("Read value: {:?}", value);
     Ok(())
 }

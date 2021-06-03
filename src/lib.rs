@@ -1,5 +1,15 @@
 #![warn(clippy::all)]
 #![warn(clippy::todo)]
+#![warn(clippy::pedantic)]
+#![warn(clippy::restriction)]
+#![allow(clippy::missing_docs_in_private_items)]
+#![allow(clippy::implicit_return)]
+#![allow(clippy::blanket_clippy_restriction_lints)]
+#![allow(clippy::missing_errors_doc)]
+#![allow(clippy::missing_inline_in_public_items)]
+#![allow(clippy::expect_used)]
+#![allow(clippy::missing_panics_doc)]
+#![deny(clippy::unwrap_used)]
 
 /*
 pub(crate) mod actor_ref {
@@ -76,6 +86,7 @@ pub(crate) mod actor_ref {
 pub mod hal {
 
     mod blocking {
+
         use embedded_hal::blocking::i2c::{Read, Write, WriteRead};
         use linux_embedded_hal::{i2cdev::linux::LinuxI2CError, I2cdev};
         use std::path::Path;
@@ -87,6 +98,8 @@ pub mod hal {
 
         pub type Error = LinuxI2CError;
         pub type Result<T> = std::result::Result<T, Error>;
+
+        pub const I2C_BUFFER_SIZE: usize = 31;
 
         impl I2CDeviceImpl {
             fn new(path: impl AsRef<Path>, addr: u8) -> Result<Self> {
@@ -121,6 +134,7 @@ pub mod hal {
             fn block_read_into(&mut self, reg: u8, buffer: &mut [u8]) -> Result<()> {
                 self.dev.write_read(self.addr, &[reg], buffer)
             }
+            #[allow(clippy::similar_names)]
             fn block_write_u16(&mut self, reg: u8, content: u16) -> Result<()> {
                 let [lsb, msb] = content.to_le_bytes();
                 self.dev.write(self.addr, &[reg, lsb, msb])
@@ -154,9 +168,9 @@ pub mod hal {
                     .chunks(32)
                     .try_for_each(|bytes| self.dev.write(self.addr, bytes))
             }*/
-            fn block_write_noreg_const_ld(&mut self, content: [u8; 32], len: u8) -> Result<()> {
-                let bytes = &content[..len as usize]; //content.splitn(2, |&x|x==0).next().unwrap_or_default();
-                self.dev.write(self.addr, bytes)
+            fn block_write_noreg_const_ld(&mut self, content: [u8; I2C_BUFFER_SIZE], len: u8) -> Result<()> {
+                let bytes = if let Some(x) = content.get(..len.into()) { x } else if let Some(x) = content.get(..) { x } else { return Ok(()); };
+                self.dev.write(self.addr, &bytes)
             }
         }
 
@@ -181,11 +195,11 @@ pub mod hal {
                             $(
                                 $message_name::$variant { $( $param, )* respond_to } => {
                                     let ret: $returntype = $body;
-                                    // The `let _ =` ignores any errors when sending.
+                                    // Ignore any errors when sending.
                                     //
                                     // This can happen if the `select!` macro is used
                                     // to cancel waiting for the response.
-                                    let _ = respond_to.send(ret);
+                                    drop(respond_to.send(ret));
                                 },
                             )+
                         }
@@ -204,7 +218,7 @@ pub mod hal {
                             // Ignore send errors. If this send fails, so does the
                             // recv.await below. There's no reason to check the
                             // failure twice.
-                            let _ = self.sender.send(msg).await;
+                            drop(self.sender.send(msg).await);
                             recv.await.expect("Actor task has been killed")
                         }
                     )+
@@ -225,7 +239,7 @@ pub mod hal {
             BlockWriteU32 block_write_u32(reg: u8, content: u32) -> Result<()> { self.dev.block_write_u32(reg, content) },
             BlockWriteU64 block_write_u64(reg: u8, content: u64) -> Result<()> { self.dev.block_write_u64(reg, content) },
             /* BlockWriteNoReg block_write_noreg(content: Box<[u8]>) -> Result<()> { self.dev.block_write_noreg(&*content) }, */
-            BlockWriteNoReg32LD block_write_noreg_arr32_ld(content: [u8; 32], len: u8) -> Result<()> { self.dev.block_write_noreg_const_ld(content, len) },
+            BlockWriteNoReg32LD block_write_noreg_arr32_ld(content: [u8; I2C_BUFFER_SIZE], len: u8) -> Result<()> { self.dev.block_write_noreg_const_ld(content, len) },
             BlockReadU16 block_read_u16(reg: u8) -> Result<u16> { self.dev.block_read_u16(reg) },
             /* BlockRead block_read(reg: u8, count: u8) -> Result<Box<[u8]>> {
                 let mut buffer = vec![0u8; count as usize];
@@ -252,10 +266,13 @@ pub mod hal {
             }
         }
     }
-    use std::path::Path;
+    use std::{convert::{TryFrom, TryInto}, path::Path};
+    use crate::hal::blocking::I2C_BUFFER_SIZE;
+
 
     pub use blocking::{Error, I2CActor, Result};
 
+    #[allow(clippy::exhaustive_enums)]
     pub enum LcdBrightness {
         R(u8),
         G(u8),
@@ -263,27 +280,36 @@ pub mod hal {
     }
     impl From<LcdBrightness> for u8 {
         fn from(this: LcdBrightness) -> Self {
+            #![allow(clippy::integer_arithmetic)]
             const BEGIN: u8 = 128;
             const LEN: u8 = 30;
+            #[allow(clippy::integer_division)]
             #[inline]
             fn rerange(x: u8) -> u8 {
-                ((((x as u16) << 2) / 35) as u8).clamp(0, LEN - 1)
+                u8::try_from(((u16::from(x)) << 2_i32) / 35).expect("u8*2/35 didn't fit into u8").clamp(0, LEN - 1)
             }
-            use LcdBrightness::*;
             match this {
-                R(r) => rerange(r) + BEGIN,
-                G(g) => rerange(g) + BEGIN + LEN,
-                B(b) => rerange(b) + BEGIN + LEN + LEN,
+                LcdBrightness::R(r) => rerange(r) + BEGIN,
+                LcdBrightness::G(g) => rerange(g) + BEGIN + LEN,
+                LcdBrightness::B(b) => rerange(b) + BEGIN + LEN + LEN,
             }
         }
     }
 
+    const I2C_CHIP_PATH: &'static str = "/dev/i2c-1";
+
     pub struct SerLcd(I2CActor);
     impl SerLcd {
+        const DEFAULT_ADDR: u8 = 0x72;
+        pub fn default() -> Result<Self> {
+            Self::new(I2C_CHIP_PATH, Self::DEFAULT_ADDR)
+        }
         pub fn new(path: impl AsRef<Path>, addr: u8) -> Result<Self> {
             Ok(Self(I2CActor::new(path, addr)?))
         }
         #[inline]
+        #[allow(clippy::integer_arithmetic)]
+        #[allow(clippy::shadow_reuse)]
         fn lineno(line: u8, column: u8) -> u8 {
             let column = column.clamp(0, 19);
             128 + column + 0x20 * (line & 0b10) + 0x64 * (line & 0b01)
@@ -292,11 +318,12 @@ pub mod hal {
         pub async fn write(&mut self, text: &str, line: u8, column: u8, everycolumn: bool) -> Result<()> {
             self.write_lines(text.lines(), line, column, everycolumn).await
         }
+        #[allow(clippy::integer_arithmetic)]
         pub async fn write_lines(&mut self, lines: impl IntoIterator<Item = impl AsRef<str>>, line: u8, column: u8, everycolumn: bool) -> Result<()> {
             let line = line;
             let column = column.clamp(0, 19);
             for (ret, len) in lines.into_iter().enumerate().map(|(i, s)| {
-                let line = line + (i % 256) as u8;
+                let line = line + u8::try_from(i % 256).expect("usize%256 didn't fit into u8");
                 let column = if i == 0 || everycolumn { column } else { 0 };
                 Self::format_line(s.as_ref(), line, column)
             }) {
@@ -305,9 +332,10 @@ pub mod hal {
             Ok(())
         }
         #[inline]
-        fn format_line(text: &str, line: u8, column: u8) -> ([u8; 32], u8) {
+        #[allow(clippy::integer_arithmetic)]
+        fn format_line(text: &str, line: u8, column: u8) -> ([u8; I2C_BUFFER_SIZE], u8) {
             use std::io::Write;
-            let mut ret = [0u8; 32];
+            let mut ret = [0_u8; I2C_BUFFER_SIZE];
             ret[0] = 254;
             ret[1] = Self::lineno(line, column);
 
@@ -315,7 +343,7 @@ pub mod hal {
             let written_len = (&mut ret[2..22]).write(s).expect("rustig: cosmic ray");
             let len = written_len + 2;
 
-            (ret, len as u8)
+            (ret, len.try_into().expect("20 didn't fit into u8"))
         }
         pub async fn clear(&mut self) -> Result<()> {
             self.0.write(b'|', b'-').await
@@ -325,21 +353,45 @@ pub mod hal {
         }
     }
 
+    #[allow(clippy::exhaustive_enums)]
+    pub enum KeypadReadout<const ASCII: bool> {
+        Digit(u8),
+        Hash,
+        Star
+    }
+    impl<const ASCII: bool> KeypadReadout<{ ASCII }> {
+        #[allow(clippy::integer_arithmetic)]
+        fn new(c: u8) -> Option<KeypadReadout<ASCII>> {
+            Some(match c {
+                x @ (b'0'..=b'9') => { Self::Digit(if ASCII { x } else { x-b'0' }) }
+                b'#' => Self::Hash,
+                b'*' => Self::Star,
+                0 => None?,
+                _x => { /* warn: bad keypad output */ None? }
+            })
+        }
+    }
+
     pub struct SparkfunKeypad(I2CActor);
     impl SparkfunKeypad {
+        const DEFAULT_ADDR: u8 = 0x4b;
+        pub fn default() -> Result<Self> {
+            Self::new(I2C_CHIP_PATH, Self::DEFAULT_ADDR)
+        }
         pub fn new(path: impl AsRef<Path>, addr: u8) -> Result<Self> {
             Ok(Self(I2CActor::new(path, addr)?))
         }
         pub async fn consume_buffer(&mut self) -> Result<usize> {
-            let mut ret = 0usize;
-            while let Some(_) = self.read().await? {
+            let mut ret = 0_usize;
+            while self.read::<true>().await?.is_some() {
                 ret = ret.wrapping_add(1);
+                if ret == 0 { ret = ret.wrapping_add(1); }
             }
             Ok(ret)
         }
-        pub async fn read(&mut self) -> Result<Option<char>> {
+        pub async fn read<const ASCII: bool>(&mut self) -> Result<Option<KeypadReadout<{ ASCII }>>> {
             self.0.write(6, 1).await?;
-            Ok(Some(self.0.read(3).await? as char).filter(|&c| c != '\0'))
+            Ok(KeypadReadout::new(self.0.read(3).await?))
         }
     }
 
@@ -355,6 +407,7 @@ pub mod hal {
         }
     }
 
+    #[allow(clippy::exhaustive_enums)]
     pub enum EncoderReading {
         Position(i16),
         ButtonClick,
@@ -362,9 +415,13 @@ pub mod hal {
 
     pub struct SparkfunEncoder(I2CActor);
     impl SparkfunEncoder {
+        const DEFAULT_ADDR: u8 = 0x3f;
+        pub async fn default() -> Result<Self> {
+            Self::new(I2C_CHIP_PATH, Self::DEFAULT_ADDR).await
+        }
         pub async fn new(path: impl AsRef<Path>, addr: u8) -> Result<Self> {
             let mut this = Self(I2CActor::new(path, addr)?);
-            this.0.block_write_u64(5, 0u64).await?;
+            this.0.block_write_u64(5, 0_u64).await?;
             this.clear_flags().await?;
             Ok(this)
         }
@@ -375,7 +432,7 @@ pub mod hal {
             self.0.write(1, 0).await
         }
         pub async fn tare(&mut self, pos: i16) -> Result<()> {
-            self.0.block_write_u16(5, pos as u16).await
+            self.0.block_write_u16(5, u16::from_ne_bytes(pos.to_ne_bytes())).await
         }
         pub async fn read(&mut self) -> Result<Option<EncoderReading>> {
             let status = self.0.read(1).await? & 0b101;
@@ -385,7 +442,7 @@ pub mod hal {
             let ret = if pressed {
                 Some(EncoderReading::ButtonClick)
             } else if knob_turned {
-                Some(EncoderReading::Position(self.0.block_read_u16(5).await? as i16))
+                Some(EncoderReading::Position(i16::from_ne_bytes(self.0.block_read_u16(5).await?.to_ne_bytes())))
             } else {
                 None
             };
@@ -400,165 +457,242 @@ pub mod hal {
 }
 
 pub mod ui {
+
     use regex_automata::DFA;
     use thiserror::Error;
 
     use super::hal::{self, EncoderReading, SerLcd, SparkfunEncoder, SparkfunKeypad};
+    use std::convert::TryInto;
     use std::time::Duration;
+    use std::convert::TryFrom;
 
+    #[non_exhaustive]
     #[derive(Error, Debug)]
     pub enum Error {
         #[error("i2c bus fault")]
         I2C(#[from] hal::Error),
         #[error("regex syntax problem")]
         Regex(#[from] regex_automata::Error),
+        #[error("menu too large")]
+        MenuTooLarge,
     }
 
     pub type Result<T> = std::result::Result<T, Error>;
 
     pub async fn menu<S: AsRef<str>>(header: impl AsRef<str>, options: impl AsRef<[S]>, lcd: &mut SerLcd, encoder: &mut SparkfunEncoder, start: usize) -> Result<usize> {
-        let header = header.as_ref();
-        let options = options.as_ref();
-        let mut cursor = start as i16;
 
-        #[inline(always)]
-        async fn draw<S: AsRef<str>, const EVERYTHING: bool>(lcd: &mut SerLcd, header: &str, options: &[S], cursor: i16, old_cursor: i16) -> Result<()> {
-            let rows: u8 = if header.is_empty() { 4 } else { 2 };
-            let rows_ = rows as i16;
-            let rows__ = rows as usize;
+        #[inline]
+        #[allow(clippy::integer_arithmetic)]
+        #[allow(clippy::integer_division)]
+        async fn draw<S: AsRef<str>, const EVERYTHING: bool>(lcd: &mut SerLcd, header: &str, options: &[S], cursor: u16, old_cursor: u16) -> Result<()> {
+            let rows: u8 = std::cmp::min(if header.is_empty() { 4 } else { 2 }, std::cmp::min(options.len(), 255).try_into().expect("min(x,255) didn't fit into u8"));
+            let rows_ = u16::from(rows);
+            let rows__ = usize::from(rows);
             if EVERYTHING || cursor / rows_ != old_cursor / rows_ {
                 lcd.clear().await?;
-                let first_idx = (cursor / rows_ * rows_) as u16 as usize;
-                let lines = &options[first_idx..first_idx + rows__];
+                let first_idx = (cursor / rows_ * rows_).into();
+                let lines = options.get(first_idx.. std::cmp::min(first_idx + rows__, options.len())).expect("rustig: min-as-boundscheck didn't work");
                 if !header.is_empty() {
                     lcd.write(header, 0, 2, true).await?;
                 }
                 lcd.write_lines(lines, 4 - rows, 2, true).await?;
             }
-            lcd.write(" ", (old_cursor % 4) as u8, 0, false).await?;
-            lcd.write(">", (/**/cursor % 4) as u8, 0, false).await?;
+            lcd.write(" ", u8::try_from(old_cursor % 4).expect("x%4 didn't fit into u8"), 0, false).await?;
+            lcd.write(">", u8::try_from(old_cursor % 4).expect("x%4 didn't fit into u8"), 0, false).await?;
             Ok(())
         }
+
+        let header = header.as_ref();
+        let options = options.as_ref();
+        if options.is_empty() { return Ok(0); }
+        let mut cursor = u16::try_from(start).map_err(|_try_from_int_error| Error::MenuTooLarge)?;
+        let options_len = i16::try_from(options.len()).map_err(|_try_from_int_error| Error::MenuTooLarge)?;
+
         draw::<_, true>(lcd, header, options, cursor, 0).await?;
 
-        encoder.tare(start as i16).await?;
+        encoder.tare(cursor.try_into().map_err(|_try_from_int_error| Error::MenuTooLarge)?).await?;
         Ok(loop {
             match encoder.read().await? {
                 Some(EncoderReading::Position(x)) => {
                     let old_cursor = cursor;
-                    cursor = periodic_domain(x, options.len() as i16);
+                    cursor = periodic_domain(x, options_len);
                     draw::<_, false>(lcd, header, options, cursor, old_cursor).await?;
                 }
-                Some(EncoderReading::ButtonClick) => break cursor as u16 as usize,
+                Some(EncoderReading::ButtonClick) => break cursor.into(),
                 None => {}
             }
-            tokio::time::sleep(Duration::from_millis(1)).await
+            tokio::time::sleep(Duration::from_millis(1)).await;
         })
     }
 
-    fn periodic_domain(i: i16, len: i16) -> i16 {
-        let rem = i % len;
-        if rem < 0 {
-            len - rem
-        } else {
-            rem
-        }
+    fn periodic_domain(i: i16, len: i16) -> u16 {
+        assert!(len > 0);
+        // ((i % len) + len) % len
+        // wrapping_rem only wraps in case of i==u16::MAX && len==-1
+        i.wrapping_rem(len).wrapping_add(len).wrapping_rem(len).try_into().expect("rustig: cosmic ray")
     }
 
-    pub async fn numeric_entry(lcd: &mut SerLcd, keypad: &mut SparkfunKeypad, name: &str) -> Result<usize> {
-        let mut buffer = String::new();
-        let max_buffer_len = (usize::MAX as f64).log10() as usize;
+    pub async fn numeric_entry(lcd: &mut SerLcd, keypad: &mut SparkfunKeypad, name: &str) -> Result<Option<usize>> {
+        use super::hal::KeypadReadout;
+        let mut buffer = 0_usize;
         lcd.clear().await?;
         lcd.write(name, 0, 0, false).await?;
-        let mut i = 0u16;
+        let mut i = 0_u16;
         loop {
-            match keypad.read().await? {
-                Some('#') => {
+            match keypad.read::<false>().await? {
+                Some(KeypadReadout::Hash) => {
                     break;
                 }
-                Some('*') => {
-                    buffer.pop();
+                Some(KeypadReadout::Star) => {
+                    if buffer == 0 { return Ok(None); }
+                    buffer /= 10;
                 }
-                Some(x) if x.is_ascii_digit() && buffer.len() < max_buffer_len => {
-                    buffer.push(x);
-                    lcd.write(&buffer, 2, 5, false).await?;
+                Some(KeypadReadout::Digit(x)) => {
+                    if let (new_buffer, false) = buffer.overflowing_mul(10) {
+                        if let (new_buffer, false) = new_buffer.overflowing_add(usize::from(x)) {
+                            buffer = new_buffer;
+                            lcd.write(&buffer.to_string(), 2, 5, false).await?;
+                        }
+                    }
                 }
-                _ => {}
+                None => {}
             }
             let (i_p, iflag) = i.overflowing_add(1);
             i = i_p;
             if iflag {
                 lcd.clear().await?;
                 lcd.write(name, 0, 0, false).await?;
-                lcd.write(&buffer, 2, 5, false).await?;
+                lcd.write(&buffer.to_string(), 2, 5, false).await?;
             }
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
-        Ok(buffer.parse().unwrap())
+        Ok(Some(buffer))
     }
 
-    pub async fn code_confirmation(lcd: &mut SerLcd, keypad: &mut SparkfunKeypad, message: &str, rng: &mut oorandom::Rand32) -> Result<()> {
-        let expectation: u16 = rng.rand_range(1000..10000) as u16;
+    pub async fn digits_entry(lcd: &mut SerLcd, keypad: &mut SparkfunKeypad, name: &str) -> Result<Option<usize>> {
+        use super::hal::KeypadReadout;
+        let mut buffer = String::with_capacity(20);
+        lcd.clear().await?;
+        lcd.write(name, 0, 0, false).await?;
+        let mut i = 0_u16;
+        loop {
+            match keypad.read::<false>().await? {
+                Some(KeypadReadout::Hash) => {
+                    break;
+                }
+                Some(KeypadReadout::Star) => {
+                    if buffer.pop().is_none() { return Ok(None); }
+                }
+                Some(KeypadReadout::Digit(x)) => {
+                    if buffer.len() < buffer.capacity() {
+                        if let Some(ch) = char::from_u32(x.into()) {
+                            buffer.push(ch);
+                            lcd.write(&*buffer, 2, 5, false).await?;
+                        }
+                    }
+                }
+                None => {}
+            }
+            let (i_p, iflag) = i.overflowing_add(1);
+            i = i_p;
+            if iflag {
+                lcd.clear().await?;
+                lcd.write(name, 0, 0, false).await?;
+                lcd.write(&*buffer, 2, 5, false).await?;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        Ok(Some(buffer.parse().expect("ascii digit string length < 20 didn't form an usize")))
+    }
+
+    pub async fn code_confirmation(lcd: &mut SerLcd, keypad: &mut SparkfunKeypad, encoder: &mut SparkfunEncoder, message: &str, rng: &mut oorandom::Rand32) -> Result<bool> {
+        use super::hal::KeypadReadout;
+        let expectation: u16 = u16::try_from(rng.rand_range(100..10000)).expect("100.10000 didn't fit into u16");
         lcd.clear().await?;
         lcd.write(message, 0, 0, false).await?;
-        lcd.write(&format!("THEN TYPE CODE: {}", expectation), 3, 0, false).await?;
-        let mut last_refresh = Some(std::time::Instant::now());
+        lcd.write(&format!("THEN TYPE CODE {:04}#", expectation), 3, 0, false).await?;
 
-        let matcher = match regex_automata::DenseDFA::new(&expectation.to_string())?.to_u16()? {
-            regex_automata::DenseDFA::PremultipliedByteClass(d) => Box::new(d),
-            _ => unreachable!(),
-        };
+        let matcher = regex_automata::DenseDFA::new(&format!("{:04}#", expectation))?.to_u16()?;
         let mut state = matcher.start_state();
 
+        let mut iteration = 0_u8;
+        let mut cycle = false;
         while !matcher.is_match_state(state) {
-            if last_refresh.map(|i| i.elapsed().as_secs() > 5).unwrap_or(true) {
+            iteration = iteration.wrapping_add(1);
+            if iteration == 0 {
                 lcd.clear().await?;
                 lcd.write(message, 0, 0, false).await?;
-                lcd.write(&format!("then type code {}", expectation), 3, 0, false).await?;
-                last_refresh = Some(std::time::Instant::now())
+                if cycle {
+                    lcd.write("OR PRESS * TO ABORT", 3, 0, false).await?;
+                } else {
+                    lcd.write(&format!("THEN TYPE CODE {:04}#", expectation), 3, 0, false).await?;
+                }
+                cycle = !cycle;
             }
-            if let Some(c) = keypad.read().await? {
-                // state always comes from the DFA, so elide bounds checks
-                state = unsafe { matcher.next_state_unchecked(state, c as u8) };
+            match keypad.read::<true>().await? {
+                Some(KeypadReadout::Digit(c)) => {
+                    // state always comes from the DFA, so elide bounds checks
+                    state = unsafe { matcher.next_state_unchecked(state, c) }
+                }
+                Some(KeypadReadout::Hash) => {
+                    // state always comes from the DFA, so elide bounds checks
+                    state = unsafe { matcher.next_state_unchecked(state, b'#') }
+                }
+                Some(KeypadReadout::Star) => {
+                    let options = &["No", "Yes"];
+                    keypad.consume_buffer().await?;
+                    let selection = menu("IS THIS OPERATION\nIMPOSSIBLE?", options, lcd, encoder, 0).await?;
+                    if options.get(selection).copied() == Some("Yes") { return Ok(false) }
+                    continue;
+                }
+                None => {}
             }
             if matcher.is_dead_state(state) {
-                last_refresh.take();
                 lcd.write("********************", 3, 0, false).await?;
                 state = matcher.start_state();
                 keypad.consume_buffer().await?;
             }
-            tokio::time::sleep(Duration::from_millis(1)).await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        Ok(())
+        Ok(true)
     }
 
-    pub async fn clear_the_bed() -> Result<()> {
-        let mut lcd = SerLcd::new("/dev/i2c-1", 0x72)?;
-        let mut keypad = SparkfunKeypad::new("/dev/i2c-1", 0x4b)?;
-        let mut rng = oorandom::Rand32::new(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("system time is in the past").as_secs());
-        super::ui::code_confirmation(&mut lcd, &mut keypad, "IDENTIFY THE SATIN\nPOWDER-COATED SHEET,\nTHEN ENTER CODE.", &mut rng).await?;
-        super::ui::code_confirmation(&mut lcd, &mut keypad, "PULL ANY TALL/NARROW\nPARTS OFF OF THE BED\nIF POSSIBLE.", &mut rng).await?;
-        super::ui::code_confirmation(&mut lcd, &mut keypad, "REMOVE SHEET FROM\nBED; BEND TO LOOSEN\nLARGE CONTENTS.", &mut rng).await?;
-        super::ui::code_confirmation(&mut lcd, &mut keypad, "CLEAR THE SHEET WITH\nPLASTIC TOOLS ONLY.", &mut rng).await?;
-        super::ui::code_confirmation(&mut lcd, &mut keypad, "CHECK FOR DEBRIS ON\nTHE SHEET; REMOVE W/\nPLASTIC TOOLS ONLY.", &mut rng).await?;
-        super::ui::code_confirmation(&mut lcd, &mut keypad, "CHECK THE UNDERSIDE\nOF THE SHEET FOR\nSMALL DEBRIS.", &mut rng).await?;
-        super::ui::code_confirmation(&mut lcd, &mut keypad, "CLEAN THE SHEET W/\n90% ISOPROPANOL AND\nMICROFIBER RAGS.", &mut rng).await?;
-        super::ui::code_confirmation(&mut lcd, &mut keypad, "REPLACE THE SHEET,\nAND ENSURE THAT\nALL IS IN ORDER.", &mut rng).await?;
+    pub async fn clear_the_bed(lcd: &mut SerLcd, keypad: &mut SparkfunKeypad, encoder: &mut SparkfunEncoder) -> Result<bool> {
+        let mut rng = oorandom::Rand32::new(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("system time is before the epoch").as_secs());
+        let messages = &[
+            "IDENTIFY THE SATIN\nPOWDER-COATED SHEET,\nMODEL LT-11.",
+            "PULL ANY TALL/NARROW\nPARTS OFF OF THE BED\nIF POSSIBLE.",
+            "REMOVE SHEET FROM\nBED; BEND TO LOOSEN\nLARGE CONTENTS.",
+            "CLEAR THE SHEET WITH\nPLASTIC TOOLS ONLY.",
+            "CHECK FOR DEBRIS ON\nTHE SHEET; REMOVE W/\nPLASTIC TOOLS ONLY.",
+            "CHECK THE UNDERSIDE\nOF THE SHEET FOR\nSMALL DEBRIS.",
+            "CLEAN THE SHEET W/\n90% ISOPROPANOL AND\nMICROFIBER RAGS.",
+            "REPLACE THE SHEET,\nAND ENSURE THAT\nALL IS IN ORDER.",
+        ];
+        for &message in messages {
+            if !super::ui::code_confirmation(lcd, keypad, encoder, message, &mut rng).await? {
+                lcd.clear().await?;
+                lcd.write("OK; PRINTER IS NOW\nMARKED OUT-OF-ORDER\nPENDING MGMT ACTION.\n", 0, 0, false).await?;
+                return Ok(false);
+            }
+        }
         lcd.clear().await?;
         lcd.write("OK, NEW PRINT JOB\nWILL BE STARTED\nAUTOMATICALLY,\nIF QUEUED.", 0, 0, false).await?;
-        Ok(())
+        Ok(true)
     }
 }
 
 //pub mod hookif { use structopt::StructOpt; }
 
 pub mod octoprint {
+
     use serde::{de::IgnoredAny, Deserialize};
     use serde_json::Value;
     use std::path::Path;
 
     #[derive(Deserialize, Debug, PartialEq, Eq, Clone, Copy)]
     #[serde(rename_all = "lowercase")]
+    #[non_exhaustive]
     pub enum FileType {
         MachineCode,
         Model,
@@ -567,6 +701,7 @@ pub mod octoprint {
 
     #[derive(Deserialize, Debug, PartialEq, Eq, Clone, Copy)]
     #[serde(rename_all = "lowercase")]
+    #[non_exhaustive]
     pub enum FileExt {
         GCode,
         Stl,
@@ -575,6 +710,7 @@ pub mod octoprint {
     #[derive(Deserialize, Debug, Clone)]
     //#[serde(rename_all="camelCase")]
     #[serde(tag = "type", content = "payload")]
+    #[non_exhaustive]
     pub enum Event<'a> {
         PrintCancelled { name: &'a Path, path: &'a Path },
         PrintDone { name: &'a Path, path: &'a Path },
@@ -600,6 +736,7 @@ pub mod octoprint {
 
     #[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
     #[serde(rename_all = "camelCase")]
+    #[non_exhaustive]
     pub enum PrinterState {
         Operational,
         Paused,
@@ -638,12 +775,13 @@ pub mod octoprint {
             self.temps.iter().max_by_key(|h| h.time).and_then(|h| h.bed.as_ref())
         }
         pub(crate) fn bed_is_heated(&self) -> Option<bool> {
-            self.latest_bed_temp().map(|t| t.target.unwrap_or_default() >= 30.0 || t.actual >= 30.0)
+            self.latest_bed_temp().map(|t| t.target.unwrap_or_default() >= 30.0_f64 || t.actual >= 30.0_f64)
         }
     }
 
     #[derive(Deserialize, Debug, Clone)]
     #[serde(rename_all = "camelCase")]
+    #[non_exhaustive]
     pub struct References<'a> {
         pub resource: &'a str,
         pub download: Option<&'a str>,
@@ -652,6 +790,7 @@ pub mod octoprint {
 
     #[derive(Deserialize, Debug, Clone)]
     #[serde(rename_all = "camelCase")]
+    #[non_exhaustive]
     pub enum Message<'a> {
         Connected(Value),
         Current(TickData),
@@ -673,6 +812,7 @@ pub mod octoprint {
 
     #[derive(Deserialize, Debug, Clone)]
     #[serde(rename_all = "camelCase")]
+    #[non_exhaustive]
     pub struct FileInfo<'a> {
         #[serde(flatten)]
         pub info: StatCommon<'a>,
@@ -688,6 +828,7 @@ pub mod octoprint {
 
     #[derive(Deserialize, Debug, Clone)]
     #[serde(rename_all = "camelCase")]
+    #[non_exhaustive]
     pub struct FolderInfo<'a> {
         #[serde(flatten)]
         pub info: StatCommon<'a>,
@@ -699,19 +840,22 @@ pub mod octoprint {
     #[derive(Deserialize, Debug, Clone)]
     #[serde(rename_all = "camelCase")]
     #[serde(untagged)]
+    #[non_exhaustive]
     pub enum Stat<'a> {
         FileInfo(#[serde(borrow)] FileInfo<'a>),
         FolderInfo(#[serde(borrow)] FolderInfo<'a>),
     }
 
     impl<'a> Stat<'a> {
+        #[must_use]
         pub fn as_file_info(&self) -> Option<&FileInfo> {
-            if let Self::FileInfo(v) = self {
+            if let Self::FileInfo(ref v) = *self {
                 Some(v)
             } else {
                 None
             }
         }
+
 
         pub fn try_into_file_info(self) -> Result<FileInfo<'a>, Self> {
             if let Self::FileInfo(v) = self {
@@ -721,8 +865,9 @@ pub mod octoprint {
             }
         }
 
+        #[must_use]
         pub fn as_folder_info(&self) -> Option<&FolderInfo> {
-            if let Self::FolderInfo(v) = self {
+            if let Self::FolderInfo(ref v) = *self {
                 Some(v)
             } else {
                 None
@@ -752,15 +897,18 @@ pub mod octoprint {
 }
 
 pub mod webif {
+
     use super::octoprint;
-    use futures_util::{stream::FusedStream, Sink, SinkExt, Stream, StreamExt};
+    use futures_util::{stream::FusedStream, Sink, SinkExt, Stream, StreamExt, FutureExt};
     use serde::Deserialize;
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
     use std::time::Duration;
     use thiserror::Error;
-    use tokio::sync::watch;
+    use tokio::sync::{RwLock, watch};
     use tokio_tungstenite::tungstenite;
 
+    #[non_exhaustive]
     #[derive(Error, Debug)]
     pub enum Error {
         #[error("bad API key")]
@@ -806,13 +954,13 @@ pub mod webif {
     pub async fn login_to_octoprint<'buffer>(
         token: &str, buffer: &'buffer mut String,
     ) -> Result<(tokio_tungstenite::WebSocketStream<impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>, octoprint::TickData), Error> {
-        let client = reqwest::Client::builder().timeout(Duration::from_secs(30)).build()?;
-        let resp = client.post(make_url("login", "").await).json(&serde_json::json!({"passive": true})).bearer_auth(token).send().await?;
         #[derive(Deserialize)]
         struct LoginResponse<'a> {
             name: &'a str,
             session: &'a str,
         }
+        let client = reqwest::Client::builder().timeout(Duration::from_secs(30)).build()?;
+        let resp = client.post(make_url("login", "").await).json(&serde_json::json!({"passive": true})).bearer_auth(token).send().await?;
         if resp.status() == reqwest::StatusCode::FORBIDDEN {
             return Err(Error::BadApiKey);
         }
@@ -820,7 +968,7 @@ pub mod webif {
         let LoginResponse { name, session } = serde_json::from_str(&buf)?;
         let mut ws_stream = tokio_tungstenite::connect_async(make_ws_url().await).await?.0;
 
-        for m in std::array::IntoIter::new([serde_json::json!({ "auth": format!("{}:{}", name, session) }), serde_json::json!({ "throttle": 118 })])
+        for m in std::array::IntoIter::new([serde_json::json!({ "auth": format!("{}:{}", name, session) }), serde_json::json!({ "throttle": 118_u8 })])
             .map(|v| tungstenite::Message::text(v.to_string()))
         {
             ws_stream.feed(m).await?;
@@ -830,12 +978,11 @@ pub mod webif {
 
         let ret = 'firstdata: loop {
             while let Some(message) = ws_stream.next().await {
-                match process_octoprint_websocket_message(&mut ws_stream, message, buffer).await? {
-                    Some(octoprint::Message::History(h)) => break 'firstdata h,
-                    _ => continue,
+                if let Some(octoprint::Message::History(h)) = process_octoprint_websocket_message(&mut ws_stream, message, buffer).await? {
+                    break 'firstdata h
                 }
             }
-            panic!();
+            panic!("octoprint quit before sending us the History message");
         };
         Ok((ws_stream, ret))
     }
@@ -848,65 +995,36 @@ pub mod webif {
     }
 
     async fn make_url(q: impl AsRef<Path>, p: impl AsRef<Path>) -> reqwest::Url {
+        fn componentize(p: &Path) -> impl Iterator<Item = &str> {
+            p.components().filter_map(|c| if let std::path::Component::Normal(x) = c { Some(x).and_then(std::ffi::OsStr::to_str) } else { None })
+        }
+
         static BASE: tokio::sync::OnceCell<reqwest::Url> = tokio::sync::OnceCell::const_new();
         let mut url = BASE.get_or_init(|| futures_util::future::ready(reqwest::Url::parse("http://octopi.local/api").expect("internal url syntax error"))).await.clone();
 
         let p = p.as_ref();
         let q = q.as_ref();
 
-        fn componentize(p: &Path) -> impl Iterator<Item = &str> {
-            p.components().filter_map(|c| if let std::path::Component::Normal(x) = c { Some(x).and_then(std::ffi::OsStr::to_str) } else { None })
-        }
-
         url.path_segments_mut().expect("cosmic ray: cannot be a base").pop_if_empty().extend(componentize(q)).extend(componentize(p));
 
         url
     }
 
-    pub async fn print_queueing(
-        token: &str, add_rx: impl Stream<Item = PathBuf>, rm_rx: impl Stream<Item = PathBuf>, shift_rx: impl Stream<Item = tokio::sync::oneshot::Sender<String>>,
-        tick_rx: tokio::sync::watch::Receiver<octoprint::TickData>,
-    ) -> Result<(), Error> {
-        futures_util::pin_mut!(add_rx);
-        futures_util::pin_mut!(rm_rx);
-        futures_util::pin_mut!(shift_rx);
-        futures_util::pin_mut!(tick_rx);
+    async fn start_print(token: &'static str, client: &reqwest::Client, path: impl AsRef<Path>) -> Result<PathBuf, Error> {
 
-        let client = reqwest::Client::new();
+        let response_buffer = client.post(make_url("files/local", path).await).bearer_auth(token).json(&serde_json::json!({"command": "move", "destination": "/"})).send().await?.error_for_status()?.text().await?;
+        let response_de: octoprint::AbridgedStat = serde_json::from_str(&response_buffer)?;
+        client.post(response_de.refs.resource).bearer_auth(token).json(&serde_json::json!({"command": "select", "print": true})).send().await?.error_for_status()?;
 
-        let mut queue: Vec<PathBuf> = {
-            let response_buffer = client.get(make_url("files/local", "queue").await).bearer_auth(token).send().await?.error_for_status()?.text().await?;
-            let response_de: octoprint::Stat = serde_json::from_str(&response_buffer)?;
-            let response_de = response_de.try_into_folder_info().expect("queue is not a folder");
-            response_de.children.iter().filter_map(|x| x.as_file_info()).map(|x| x.info.path.to_path_buf()).collect()
-        };
-
-        let queue_path = std::path::Path::new("queue");
-
-        loop {
-            tokio::select! {
-                biased;
-                Some(new_file) = add_rx.next() => {
-                    queue.insert(0, queue_path.join(new_file));
-                }
-                Some(old_file) = rm_rx.next() => {
-                    let old_file = queue_path.join(old_file);
-                    queue.retain(|x| old_file.cmp(x) != std::cmp::Ordering::Equal);
-                }
-                Some(tx) = shift_rx.next(), if !queue.is_empty() && tick_rx.borrow().state.flags.get(&octoprint::PrinterState::Operational).copied().unwrap_or_default() => {
-                    let response_buffer = client.post(make_url("files/local", queue.pop().expect("cosmic ray")).await).bearer_auth(token).json(&serde_json::json!({"command": "move", "destination": "/"})).send().await?.error_for_status()?.text().await?;
-                    let response_de: octoprint::AbridgedStat = serde_json::from_str(&response_buffer)?;
-                    client.post(response_de.refs.resource).bearer_auth(token).json(&serde_json::json!({"command": "select", "print": true})).send().await?.error_for_status()?;
-
-                    if tx.send(response_de.path.to_string_lossy().into_owned()).is_err() { break Ok(()) }
-                }
-                else => break Ok(())
-            }
-        }
+        Ok(response_de.path.to_owned())
     }
 
     pub async fn do_stuff(token: &'static str) -> Result<(), Error> {
         let mut buffer = Default::default();
+
+        let mut lcd = super::hal::SerLcd::default().map_err(super::ui::Error::from)?;
+        let mut keypad = super::hal::SparkfunKeypad::default().map_err(super::ui::Error::from)?;
+        let mut encoder = super::hal::SparkfunEncoder::default().await.map_err(super::ui::Error::from)?;
 
         let (ws_stream, first_data) = login_to_octoprint(token, &mut buffer).await?;
 
@@ -915,61 +1033,78 @@ pub mod webif {
         let (data_tx, data_rx) = watch::channel::<octoprint::TickData>(first_data);
         let (is_heated_tx, mut is_heated_rx) = watch::channel(false);
 
-        let (add_tx, add_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (rm_tx, rm_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (shift_tx, shift_rx) = tokio::sync::mpsc::unbounded_channel();
+        let octoprint_rest_client = reqwest::Client::new();
+
+        let mut queue = Arc::new(RwLock::new({
+            let response_buffer = octoprint_rest_client.get(make_url("files/local", "queue").await).bearer_auth(token).send().await?.error_for_status()?.text().await?;
+            let response_de: octoprint::Stat = serde_json::from_str(&response_buffer)?;
+            let response_de = response_de.try_into_folder_info().expect("queue is not a folder");
+            response_de.children.iter().filter_map(octoprint::Stat::as_file_info).map(|x| x.info.path.to_path_buf()).collect::<Vec<PathBuf>>()
+        }));
+
+        let queue_path = std::path::Path::new("queue");
 
         let mut print_complete_flag = false;
+        let mut printer_ready_flag = false;
+
+        let (mut ws_sink, mut ws_stream) = ws_stream.split();
 
         let mut subtask_handles = std::array::IntoIter::new([
             tokio::spawn(heat_translator(data_rx.clone(), is_heated_tx)),
-            tokio::spawn(print_queueing(
-                token,
-                tokio_stream::wrappers::UnboundedReceiverStream::new(add_rx),
-                tokio_stream::wrappers::UnboundedReceiverStream::new(rm_rx),
-                tokio_stream::wrappers::UnboundedReceiverStream::new(shift_rx),
-                data_rx.clone(),
-            )),
-        ])
-        .collect::<futures_util::stream::FuturesUnordered<_>>();
 
-        let (mut ws_sink, ws_stream) = ws_stream.split();
-
-        let mut ws_stream = ws_stream.fuse();
-
-        let ret = loop {
-            tokio::select! {
-                biased;
-                // todo: Ctrl-C et al
-                r = subtask_handles.select_next_some(), if !subtask_handles.is_terminated() || break Ok(()) => { break Ok(r.unwrap()?); }
-                message = ws_stream.select_next_some(), if !ws_stream.is_terminated() => {
+            tokio::spawn({let queue = Arc::clone(&queue); async move {
+                while let Some(message) = ws_stream.next().await {
                     if let Some(message) = process_octoprint_websocket_message(&mut ws_sink, message, &mut buffer).await? {
                         use octoprint::{Message::*, Event::*};
                         match message {
-                            Event(FileAdded { storage: "local", path, name, r#type: (octoprint::FileType::MachineCode, _) }) if path.components().cmp(std::iter::once(std::path::Component::Normal(std::ffi::OsStr::new("queue")))) == std::cmp::Ordering::Equal => if add_tx.send(path.join(name)).is_err() { break Ok(()); },
-                            Event(FileRemoved { storage: "local", path, name, r#type: (octoprint::FileType::MachineCode, _) }) if path.components().cmp(std::iter::once(std::path::Component::Normal(std::ffi::OsStr::new("queue")))) == std::cmp::Ordering::Equal => if rm_tx.send(path.join(name)).is_err() { break Ok(()); },
-                            Event(FileAdded { .. }) | Event(FileRemoved { .. })=> {},
+                            Event(FileAdded { storage: "local", path, name, r#type: (octoprint::FileType::MachineCode, _) })
+                                if path.components().eq(std::iter::once(std::path::Component::Normal(std::ffi::OsStr::new("queue"))))
+                                    => {
+                                        let new_file = queue_path.join(name);
+                                        queue.write().await.insert(0, new_file); },
+                            Event(FileRemoved { storage: "local", path, name, r#type: (octoprint::FileType::MachineCode, _) })
+                                if path.components().eq(std::iter::once(std::path::Component::Normal(std::ffi::OsStr::new("queue"))))
+                                    => {
+                                        let old_file = queue_path.join(name);
+                                        queue.write().await.retain(|x| old_file.cmp(x) != std::cmp::Ordering::Equal); },
+                            Event(FileAdded { .. }) | Event(FileRemoved { .. }) => {},
                             Event(PrintDone { .. }) => { print_complete_flag = true; },
-                            Event(Shutdown) => break Ok(()),
-                            Event(PrintCancelled { .. }) => todo!(),
-                            Event(Disconnected) => todo!(),
-                            Event(Error { error }) => todo!(),
-                            Current(m) => { if data_tx.send(m).is_err() { break Ok(()); } },
+                            Event(Shutdown) => break,
+                            Event(PrintCancelled { .. }) => { printer_ready_flag = false; },
+                            Event(Disconnected) => break,
+                            Event(Error { error }) => { printer_ready_flag = false; },
+                            Current(m) => { if data_tx.send(m).is_err() { break; } },
                             History(_) | Connected(_) | SlicingProgress(_) => {}
                         }
                     }
                 }
-                Ok(()) = is_heated_rx.changed() => if print_complete_flag && !*is_heated_rx.borrow() {
-                    print_complete_flag = false;
-                    super::ui::clear_the_bed().await?;
-                }
-                else { break Ok(()); }
-            }
+                Ok(())
+            }}),
+        ])
+        .collect::<futures_util::stream::FuturesUnordered<_>>();
+
+        let ret = loop {
+            futures_util::select_biased! {
+                // biased;
+                // todo: Ctrl-C et al
+                r = subtask_handles.select_next_some() => { break Ok(r.expect("panic propagation")?); },
+                r = is_heated_rx.changed().fuse() => {
+                    if r.is_err() { break Ok(()); }
+                    if print_complete_flag && !*is_heated_rx.borrow() {
+                        print_complete_flag = false;
+                        printer_ready_flag = super::ui::clear_the_bed(&mut lcd, &mut keypad, &mut encoder).await?;
+                        if printer_ready_flag && data_rx.borrow().state.flags.get(&octoprint::PrinterState::Operational).copied().unwrap_or_default() {
+                            if let Some(p) = queue.write().await.pop() {
+                                start_print(token, &octoprint_rest_client, p).await?;
+                            }
+                        }
+                    }
+                },
+                complete => { break Ok(()); }
+            };
             tokio::task::yield_now().await;
         };
-        while !subtask_handles.is_terminated() {
-            subtask_handles.select_next_some().await.unwrap()?;
-        }
+        while let Some(()) = subtask_handles.next().await.map(|r| r.expect("panic propagation")).transpose()? {}
         ret
     }
 
